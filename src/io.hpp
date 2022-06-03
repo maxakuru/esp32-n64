@@ -154,14 +154,7 @@ class IO
     static SemaphoreHandle_t control_sem;
     static SemaphoreHandle_t joystick_sem;
     static SemaphoreHandle_t led_sem;
-
-
-
     static io_config_t config;
-
-    // static button_config_t button_conf[];
-    // static hat_config_t hat_conf[];
-    // static axis_config_t axis_conf[];
 
     static void initButton(button_config_t*);
     static void initLED(led_config_t*);
@@ -191,7 +184,6 @@ class IO
     static hatchange_cb_t hatchange_cb;
     static axischange_cb_t axischange_cb;
     static controlpress_cb_t controlpress_cb;
-
 };
 
 

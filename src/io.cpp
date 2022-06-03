@@ -52,8 +52,6 @@
 #define TIMER_SCALE           (TIMER_BASE_CLK / TIMER_DIVIDER)  // convert counter value to seconds
 #define TIMER_INTERVAL0_SEC   (0.001) // sample test interval for the first timer
 
-#define DEBOUNCE_TIME 10000 // microseconds
-
 struct input_message_t {
     gpio_num_t pin;
     Input type;
@@ -95,11 +93,9 @@ input_message_t interrupt_params[30];
 int control_press_start = 0;
 
 #ifdef USE_DEBOUNCE
+#define DEBOUNCE_TIME 10000 // microseconds
 int last_timers[40];
 #endif // USE_DEBOUNCE
-
-// uint8_t analog_interrupt_count = 0;
-// interrupt_analog_message_t analog_interrupt_params[4];
 
 int IO::state[10][30][10];
 
@@ -281,7 +277,7 @@ void IRAM_ATTR IO::ledTask(void *args)
                 bool on = true;
                 int ticks = 0;
                 while(control_pressed) {
-                    // breakpoints are 1.5/3/5/10 seconds
+                    // breakpoints are 1.5/3/5/20 seconds
                     if((ticks >= 15 && ticks <= 18) 
                     || (ticks >= 30 && ticks <= 33) 
                     || (ticks >= 50 && ticks <= 53) 
@@ -351,7 +347,6 @@ void IRAM_ATTR IO::joystickTask(void *args) {
             }
             timer_group_enable_alarm_in_isr(TIMER_GROUP, TIMER_N);
         }
-        // vTaskDelay(10 / portTICK_PERIOD_MS);
     }
     vTaskDelete(NULL);
 }
