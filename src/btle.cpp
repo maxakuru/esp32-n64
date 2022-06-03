@@ -50,7 +50,7 @@ bool BTLE::init(){
 
     IO::onButtonChange([](Button btn, bool pressed){
         // log_d("[BTLE] onButtonChange(): btn=%d pressed=%d\n", btn, pressed);
-        if(btn >= Button::Sync || btn == Button::None) return;
+        if(btn >= Button::Control || btn == Button::None) return;
         if(btn < Button::VolumeMute) {
             if(pressed) gamepad.pressSpecialButton((uint8_t)btn);
             else gamepad.releaseSpecialButton((uint8_t)btn);

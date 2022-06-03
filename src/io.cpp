@@ -52,14 +52,16 @@
 #define TIMER_SCALE           (TIMER_BASE_CLK / TIMER_DIVIDER)  // convert counter value to seconds
 #define TIMER_INTERVAL0_SEC   (0.001) // sample test interval for the first timer
 
-struct interrupt_message_t {
+#define DEBOUNCE_TIME 10000 // microseconds
+
+struct input_message_t {
     gpio_num_t pin;
     Input type;
     uint8_t index;
     int id;
 };
 
-struct interrupt_analog_message_t {
+struct joystick_message_t {
     gpio_num_t pins[3];
     Input type;
     uint8_t index;
@@ -68,28 +70,41 @@ struct interrupt_analog_message_t {
 bool IO::initialized = false;
 bool IO::paused = false;
 int IO::count = 0;
+bool IO::control_pressed = false;
+uint16_t IO::led_blinkrate_on = 0;
+uint16_t IO::led_blinkrate_off = 0;
+LedState IO::led_state = LedState::On;
 uint8_t IO::priority = 1;
 uint8_t IO::core = 0;
 uint32_t IO::x = 0;
 uint32_t IO::y = 0;
-xQueueHandle IO::queue = xQueueCreate(25, sizeof(interrupt_message_t));
-SemaphoreHandle_t IO::digital_sem = xSemaphoreCreateBinary();
-SemaphoreHandle_t IO::analog_sem = xSemaphoreCreateBinary();
+xQueueHandle IO::queue = xQueueCreate(25, sizeof(input_message_t));
+SemaphoreHandle_t IO::input_sem = xSemaphoreCreateBinary();
+SemaphoreHandle_t IO::control_sem = xSemaphoreCreateBinary();
+SemaphoreHandle_t IO::joystick_sem = xSemaphoreCreateBinary();
+SemaphoreHandle_t IO::led_sem = xSemaphoreCreateBinary();
 inputchange_cb_t IO::inputchange_cb = NULL;
 hatchange_cb_t IO::hatchange_cb = NULL;
 axischange_cb_t IO::axischange_cb = NULL;
 buttonchange_cb_t IO::buttonchange_cb = NULL;
-
+controlpress_cb_t IO::controlpress_cb = NULL;
 
 uint8_t interrupt_count = 0;
-interrupt_message_t interrupt_params[30];
+input_message_t interrupt_params[30];
 
-uint8_t analog_interrupt_count = 0;
-interrupt_analog_message_t analog_interrupt_params[4];
+int control_press_start = 0;
+
+#ifdef USE_DEBOUNCE
+int last_timers[40];
+#endif // USE_DEBOUNCE
+
+// uint8_t analog_interrupt_count = 0;
+// interrupt_analog_message_t analog_interrupt_params[4];
 
 int IO::state[10][30][10];
 
 io_config_t IO::config = {
+    // buttons
     {
         {
             (gpio_num_t)PIN_A, // pin
@@ -115,10 +130,7 @@ io_config_t IO::config = {
             (gpio_num_t)PIN_SHOULDER_RIGHT,
             Button::R1
         },
-        {
-            (gpio_num_t)PIN_SYNC,
-            Button::Sync
-        },
+        {(gpio_num_t)-1},
         {(gpio_num_t)-1},
         {(gpio_num_t)-1},
         {(gpio_num_t)-1},
@@ -134,6 +146,7 @@ io_config_t IO::config = {
         {(gpio_num_t)-1}
     },
 
+    // hats
     {
         {
             (gpio_num_t)PIN_D_UP,    // up pin
@@ -151,6 +164,7 @@ io_config_t IO::config = {
         }
     },
 
+    // joysticks
     {
         {
             (gpio_num_t)PIN_JOYSTICK_X, // x
@@ -162,23 +176,63 @@ io_config_t IO::config = {
             (gpio_num_t)-1,
             Axis::None
         }
-    }
+    },
+    
+    // LED
+    {
+        (gpio_num_t)PIN_LED_INFO
+    },
+
+    {
+        (gpio_num_t)PIN_CTRL,
+        Button::Control
+    },
 };
 
-void IRAM_ATTR IO::interruptDelegate(void *args)
+void IRAM_ATTR IO::inputIntrDelegate(void *args)
 {
+    input_message_t *msg = (input_message_t*)args;
+    #ifdef USE_DEBOUNCE
+    int now = micros();
+    int last = last_timers[msg->pin];
+    if(now - last > DEBOUNCE_TIME) {
+        last_timers[msg->pin] = now;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xQueueSendFromISR(queue, msg, (TickType_t)0);
+        xSemaphoreGiveFromISR(input_sem, &xHigherPriorityTaskWoken);
+    }
+    #else
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xQueueSendFromISR(queue, (interrupt_message_t*)args, (TickType_t)0);
-    xSemaphoreGiveFromISR(digital_sem, &xHigherPriorityTaskWoken);
+    xQueueSendFromISR(queue, msg, (TickType_t)0);
+    xSemaphoreGiveFromISR(input_sem, &xHigherPriorityTaskWoken);
+    #endif
 }
 
-void IRAM_ATTR IO::interruptHandler(void *_)
+void IRAM_ATTR IO::controlIntrDelegate(void *args)
+{
+    #ifdef USE_DEBOUNCE
+    button_config_t *btn = (button_config_t*)args;
+    int last = last_timers[btn->pin];
+    int now = micros();
+    if(now - last > DEBOUNCE_TIME) {
+        last_timers[btn->pin] = now;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xSemaphoreGiveFromISR(control_sem, &xHigherPriorityTaskWoken);
+    }
+
+    #else
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(control_sem, &xHigherPriorityTaskWoken);
+    #endif
+}
+
+void IRAM_ATTR IO::inputTask(void *_)
 {
     for (;;)
     {
-        if (xSemaphoreTake(digital_sem, portMAX_DELAY) == pdTRUE)
+        if (xSemaphoreTake(input_sem, portMAX_DELAY) == pdTRUE)
         {
-            struct interrupt_message_t args;
+            struct input_message_t args;
             while (xQueueReceive(queue, &args, 0) == pdTRUE)
             {
                 IO::updateState(args.pin, args.type, args.index, args.id);
@@ -188,11 +242,87 @@ void IRAM_ATTR IO::interruptHandler(void *_)
     vTaskDelete(NULL);
 }
 
-void IRAM_ATTR IO::timerHandler(void *args) {
+void IRAM_ATTR IO::controlTask(void *args)
+{
+    button_config_t *btn = (button_config_t*)args;
+    for (;;)
+    {
+        if (xSemaphoreTake(control_sem, portMAX_DELAY) == pdTRUE)
+        {            
+            int val = digitalRead(btn->pin);
+            if(val == LOW) {
+                // pressed, turn on LED and start timer
+                control_pressed = true;
+                control_press_start = millis();
+            } else {
+                // released
+                int now = millis();
+                control_pressed = false;
+                printf("now: %d\n before: %d\n diff: %d \n", now, control_press_start, now - control_press_start);
+                if(controlpress_cb != NULL) {
+                    controlpress_cb(now - control_press_start);
+                }
+            }
+            xSemaphoreGive(led_sem);
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+void IRAM_ATTR IO::ledTask(void *args)
+{
+    led_config_t *led = (led_config_t*)args;
+    for (;;)
+    {
+        if (xSemaphoreTake(led_sem, portMAX_DELAY) == pdTRUE)
+        {
+            ets_printf("ledTask() got semaphore\n");
+
+            if(control_pressed) {
+                digitalWrite(led->pin, HIGH);
+                
+                bool on = true;
+                int ticks = 0;
+                while(control_pressed) {
+                    // breakpoints are 1.5/3/5/10 seconds
+                    if((ticks >= 15 && ticks <= 18) 
+                    || (ticks >= 30 && ticks <= 33) 
+                    || (ticks >= 50 && ticks <= 53) 
+                    || (ticks >= 200 && ticks <= 203)) {
+                        on = !on;
+                        digitalWrite(led->pin, on);
+                    }
+                    ticks++;
+                    vTaskDelay(100 / portTICK_PERIOD_MS);
+                }
+            }
+            
+            if(led_state == LedState::On) {
+                digitalWrite(led->pin, HIGH);
+            } else if(led_state == LedState::Off) {
+                digitalWrite(led->pin, LOW);
+            } else {
+                bool s = digitalRead(led->pin);
+                while(led_state == LedState::Blink && !control_pressed) {
+                    s = !s;
+                    digitalWrite(led->pin, s);
+                    if(s) {
+                        vTaskDelay(led_blinkrate_on / portTICK_PERIOD_MS);
+                    } else {
+                        vTaskDelay(led_blinkrate_off / portTICK_PERIOD_MS);
+                    }
+                }
+            }
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+void IRAM_ATTR IO::joystickTask(void *args) {
     axis_config_t (*axes)[2] = (axis_config_t(*)[2])args;
     for (;;)
     {
-        if (xSemaphoreTake(analog_sem, portMAX_DELAY) == pdTRUE)
+        if (xSemaphoreTake(joystick_sem, portMAX_DELAY) == pdTRUE)
         {
             for(auto axis : *axes) {
                 if(axis.type == Axis::None) {
@@ -229,12 +359,12 @@ void IRAM_ATTR IO::timerHandler(void *args) {
     vTaskDelete(NULL);
 }
 
-void IRAM_ATTR IO::timerCallback(void *args)
+void IRAM_ATTR IO::joystickCallback(void *args)
 {
     timer_spinlock_take(TIMER_GROUP);
     timer_group_intr_clr_in_isr(TIMER_GROUP, TIMER_N);
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xSemaphoreGiveFromISR(analog_sem, &xHigherPriorityTaskWoken);
+    xSemaphoreGiveFromISR(joystick_sem, &xHigherPriorityTaskWoken);
     timer_spinlock_give(TIMER_GROUP);
 }
 
@@ -387,58 +517,143 @@ bool IO::init()
         return false;
     }
 
+    initLED(&config.led);
+
+    initControlButton(&config.control_btn);
+
     xTaskCreate(
-        IO::interruptHandler,
-        "digital IO change interrupt",
+        IO::inputTask,
+        "button input task",
         8192,
         NULL,
         priority,
-        NULL);
+        NULL
+    );
 
-    pinMode(LED_INFO, OUTPUT);
+     xTaskCreate(
+        IO::controlTask,
+        "control button task",
+        4096,
+        (void*)&config.control_btn,
+        max(priority - 1, 1),
+        NULL
+    );
 
-    int i = 0;
-    for (button_config_t btn : config.buttons)
-    {
-        if(btn.type == Button::None || btn.pin < 0) {
+    xTaskCreatePinnedToCore(
+        IO::joystickTask, 
+        "joystick analog read task", 
+        8192, 
+        (void*)&config.axes, 
+        min(priority + 1, 5), 
+        NULL, 
+        core
+    );
+
+     xTaskCreate(
+        IO::ledTask,
+        "LED control task",
+        2048,
+        (void*)&config.led,
+        min(priority + 2, 5),
+        NULL
+    );
+
+
+    for(uint8_t i=0; i<MAX_BUTTONS; i++) {
+        button_config_t *btn = &config.buttons[i];
+        if(btn->type == Button::None || btn->pin < 0) {
             continue;
         }
         log_d("[IO] init button (%d) on pin #%d\n", btn.type, btn.pin);
         initButton(btn);
-        i++;
     }
 
-    i = 0;
-    for (hat_config_t hat : config.hats)
-    {
-        if(hat.type == Hat::None) {
+    for(uint8_t i=0; i<MAX_HATS; i++) {
+        hat_config_t *hat = &config.hats[i];
+        if(hat->type == Hat::None) {
             continue;
         }
-        log_d("[IO] init hat #%d on pins: up=%d, right=%d, down=%d, left=%d\n", i, hat.up_pin, hat.right_pin, hat.down_pin, hat.left_pin);
+        log_d("[IO] init hat #%d on pins: up=%d, right=%d, down=%d, left=%d\n", i, hat->up_pin, hat->right_pin, hat->down_pin, hat->left_pin);
         initHat(hat, i);
-        i++;
     }
 
-    i = 0;
-    for (axis_config_t axis : config.axes)
-    {
-        if(axis.type == Axis::None) {
+    for(uint8_t i=0; i<MAX_AXES; i++) {
+        axis_config_t *axis = &config.axes[i];
+        if(axis->type == Axis::None) {
             continue;
         }
-        log_d("[IO] init axis #%d on pins: x=%d, y=%d\n", i, axis.x_pin, axis.y_pin);
+        log_d("[IO] init axis #%d on pins: x=%d, y=%d\n", i, axis->x_pin, axis->y_pin);
         initAxis(axis, i);
-        i++;
     }
 
-    initTimer();
+    initJoystickTimer();
 
     initialized = true;
     return true;
 }
 
-void IO::initTimer() {
-    xTaskCreatePinnedToCore(IO::timerHandler, "analog timer handler", 8192, (void*)&config.axes, max(priority+1, 5), NULL, core);
+void IO::initLED(led_config_t *led) {
+    if(led->pin < 0) {
+        return;
+    }
 
+    gpio_pad_select_gpio(led->pin);
+    esp_err_t err = gpio_set_direction(led->pin, GPIO_MODE_OUTPUT);
+    if (err)
+    {
+        log_e("[IO] initLED(%d) >> error setting mode: %i\n", led->pin, (int)err);
+        return;
+    }
+
+    // on during boot up
+    digitalWrite(led->pin, HIGH);
+}
+
+void IO::initControlButton(button_config_t *btn) {
+    printf("initControlButton(): %d\n", btn->pin);
+    gpio_pad_select_gpio(btn->pin);
+    esp_err_t err = gpio_set_direction(btn->pin, GPIO_MODE_INPUT);
+    if (err)
+    {
+        log_e("[IO] initControlButton(%d) >> error setting mode: %i\n", btn->pin, (int)err);
+        return;
+    }
+
+    #ifdef USE_DEBOUNCE
+    last_timers[btn->pin] = micros();
+    #endif
+
+    err = gpio_set_pull_mode(btn->pin, GPIO_PULLUP_ONLY);
+    if (err)
+    {
+        log_e("[IO] initControlButton(%d) >> error setting pull direction: %i\n", btn->pin, (int)err);
+        return;
+    }
+
+    err = gpio_set_intr_type(btn->pin, GPIO_INTR_ANYEDGE);
+    if (err)
+    {
+        log_e("[IO] initControlButton(%d) >> error setting interrupt type: %i\n", btn->pin, (int)err);
+        return;
+    }
+
+    err = gpio_intr_enable(btn->pin);
+    if (err)
+    {
+        log_e("[IO] initControlButton(%d) >> error enabling interrupt %i\n", btn->pin, (int)err);
+        return;
+    }
+
+    err = gpio_isr_handler_add(btn->pin, controlIntrDelegate, (void *)&btn);
+
+    if (err)
+    {
+        log_e("[IO] initControlButton(%d) >> error registering isr: %i\n", btn->pin, (int)err);
+        return;
+    }
+}
+
+void IO::initJoystickTimer() {
     timer_config_t config;
     config.divider     = TIMER_DIVIDER;
     config.counter_en  = TIMER_PAUSE;
@@ -448,24 +663,28 @@ void IO::initTimer() {
     timer_init(TIMER_GROUP, TIMER_N, &config);
     timer_set_alarm_value(TIMER_GROUP, TIMER_N, (double)TIMER_INTERVAL0_SEC * TIMER_SCALE);
     timer_enable_intr(TIMER_GROUP, TIMER_N);
-    timer_isr_register(TIMER_GROUP, TIMER_N, IO::timerCallback, NULL, 0, NULL);
+    timer_isr_register(TIMER_GROUP, TIMER_N, IO::joystickCallback, NULL, 0, NULL);
     timer_start(TIMER_GROUP, TIMER_N);
 }
 
-void IO::initHat(hat_config_t hat, uint8_t index)
+void IO::initHat(hat_config_t *hat, uint8_t index)
 {
-    initInputPin(hat.up_pin, Input::Hat, index, (int)HatDirection::Up);
-    initInputPin(hat.right_pin, Input::Hat, index, (int)HatDirection::Right);
-    initInputPin(hat.down_pin, Input::Hat, index, (int)HatDirection::Down);
-    initInputPin(hat.left_pin, Input::Hat, index, (int)HatDirection::Left);
+    initInputPin(hat->up_pin, Input::Hat, index, (int)HatDirection::Up);
+    initInputPin(hat->right_pin, Input::Hat, index, (int)HatDirection::Right);
+    initInputPin(hat->down_pin, Input::Hat, index, (int)HatDirection::Down);
+    initInputPin(hat->left_pin, Input::Hat, index, (int)HatDirection::Left);
 }
 
-void IO::initButton(button_config_t btn)
+void IO::initButton(button_config_t *btn)
 {
-    initInputPin(btn.pin, Input::Button, (int)btn.type);
+    if(btn->type == Button::Control) {
+        initControlButton(btn);
+    } else {
+        initInputPin(btn->pin, Input::Button, (int)btn->type);
+    }
 }
 
-void IO::initAxis(axis_config_t axis, uint8_t index)
+void IO::initAxis(axis_config_t *axis, uint8_t index)
 {
     log_d("[IO] initAxis() type=%d, x=%d, y=%d\n", axis.type, axis.x_pin, axis.y_pin);
     // #ifdef USE_ATTENUATION
@@ -475,11 +694,11 @@ void IO::initAxis(axis_config_t axis, uint8_t index)
     // #endif // USE_12BIT_ADC
     // analogSetPinAttenuation(axis.x_pin, att);
 
-    if(axis.x_pin > 0) {
-        pinMode(axis.x_pin, INPUT_PULLDOWN);
+    if(axis->x_pin > 0) {
+        pinMode(axis->x_pin, INPUT_PULLDOWN);
     }
-    if(axis.y_pin > 0) {
-        pinMode(axis.y_pin, INPUT_PULLDOWN);
+    if(axis->y_pin > 0) {
+        pinMode(axis->y_pin, INPUT_PULLDOWN);
     }
 }
 
@@ -490,6 +709,9 @@ void IO::initInputPin(gpio_num_t pin, Input type, uint8_t index, int id)
     }
     log_d("[IO]initInputPin() pin=%d type=%d index=%d id=%d\n", pin, type, index, id);
 
+    #ifdef USE_DEBOUNCE
+    last_timers[pin] = micros();
+    #endif
 
     gpio_pad_select_gpio(pin);
     esp_err_t err = gpio_set_direction(pin, GPIO_MODE_INPUT);
@@ -520,14 +742,14 @@ void IO::initInputPin(gpio_num_t pin, Input type, uint8_t index, int id)
         return;
     }
 
-    struct interrupt_message_t args = {
+    struct input_message_t args = {
         pin,
         type,
         index,
         id
     };
     interrupt_params[interrupt_count] = args;
-    err = gpio_isr_handler_add(pin, interruptDelegate, (void *)&interrupt_params[interrupt_count]);
+    err = gpio_isr_handler_add(pin, inputIntrDelegate, (void *)&interrupt_params[interrupt_count]);
     interrupt_count++;
 
     if (err)
@@ -555,6 +777,24 @@ void IO::onHatChange(hatchange_cb_t cb)
 void IO::onAxisChange(axischange_cb_t cb)
 {
     axischange_cb = cb;
+}
+
+void IO::onControlPress(controlpress_cb_t cb)
+{
+    controlpress_cb = cb;
+}
+
+void IO::setLEDState(LedState s, uint16_t blinkrate_on, uint16_t blinkrate_off){
+    led_state = s;
+    if(blinkrate_on > 0) {
+        led_blinkrate_on = blinkrate_on;
+        if(blinkrate_off > 0) {
+            led_blinkrate_off = blinkrate_off;
+        } else {
+            led_blinkrate_off = blinkrate_on;
+        }
+    }
+    xSemaphoreGive(led_sem);
 }
 
 void IO::reset()

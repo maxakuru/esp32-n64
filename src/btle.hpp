@@ -1,5 +1,5 @@
-#ifndef BTLE_H
-#define BTLE_H
+#ifndef BTLE_H_
+#define BTLE_H_
 
 #include <BleGamepad.h>
 
@@ -14,4 +14,4 @@ class BTLE
     static bool initialized;
 };
 
-#endif // BTLE_H
+#endif // BTLE_H_

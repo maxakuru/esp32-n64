@@ -1,5 +1,5 @@
-#ifndef UTIL_H
-#define UTIL_H
+#ifndef UTIL_H_
+#define UTIL_H_
 
 #include <Arduino.h>
 
@@ -55,4 +55,4 @@ static int16_t scaleToRange(int16_t val, int16_t min, int16_t max, int16_t og_mi
     return ((max-min)*(val-og_min)/(og_max-og_min))+min;
 }
 
-#endif // UTIL_H
+#endif // UTIL_H_
