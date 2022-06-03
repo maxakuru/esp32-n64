@@ -24,29 +24,45 @@ void setup()
   delay(2500);
 
   IO::init();
-  BTLE::init();
-
   IO::setLEDState(LedState::Off);
 
+  BTLE::onStarted([]() {
+      IO::setLEDState(LedState::Blink, 400, 400);
+  });
+
+  BTLE::onConnect([]() {
+      IO::setLEDState(LedState::Off);
+  });
+
+  BTLE::onDisconnect([]() {
+      IO::setLEDState(LedState::Blink, 400, 400);
+  });
+
+  BTLE::init();
+
+
   IO::onControlPress([](int duration){
-    printf("[main] Control pressed CB: %d\n", duration);
+    log_i("[main] Control pressed CB: %d\n", duration);
     if(wifi_config_enabled()) {
       wifi_config_disable();
       IO::setLEDState(LedState::Off);
     } else if(duration >= 20000) {
       // 20s => reset
-      printf("[main] reset..\n");
+      log_i("[main] reset..\n");
+      BTLE::reset();
+      esp_restart();
     } else if(duration >= 5000) {
-      printf("[main] config..\n");
+      log_i("[main] config..\n");
       wifi_config_enable();
       IO::setLEDState(LedState::Blink, 1000, 1000);
     } else if(duration >= 3000) {
-      printf("[main] sync..\n");
-      IO::setLEDState(LedState::Blink, 400, 400);
+      log_i("[main] sync..\n");
+      IO::setLEDState(LedState::Blink, 400, 600);
+      BTLE::toggleSync();
     } else if(duration >= 1500) {
-      printf("[main] off..\n");
+      log_i("[main] off..\n");
     } else {
-      printf("[main] click..\n");
+      log_i("[main] click..\n");
     }
     // < 1s == click == nothing (todo: power on)
     // 1s == nothing (todo: power off)

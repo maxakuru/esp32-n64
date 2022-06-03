@@ -28,7 +28,7 @@
 #define PIN_JOYSTICK_Y 35
 
 // control/sync (input, pullup)
-#define PIN_CTRL 21
+#define PIN_CTRL_BTN 21
 
 // battery level (input, ADC)
 #define PIN_BAT 34

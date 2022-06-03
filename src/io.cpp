@@ -184,7 +184,7 @@ io_config_t IO::config = {
     },
 
     {
-        (gpio_num_t)PIN_CTRL,
+        (gpio_num_t)PIN_CTRL_BTN,
         Button::Control
     },
 };
@@ -258,7 +258,6 @@ void IRAM_ATTR IO::controlTask(void *args)
                 // released
                 int now = millis();
                 control_pressed = false;
-                printf("now: %d\n before: %d\n diff: %d \n", now, control_press_start, now - control_press_start);
                 if(controlpress_cb != NULL) {
                     controlpress_cb(now - control_press_start);
                 }
@@ -276,8 +275,6 @@ void IRAM_ATTR IO::ledTask(void *args)
     {
         if (xSemaphoreTake(led_sem, portMAX_DELAY) == pdTRUE)
         {
-            ets_printf("ledTask() got semaphore\n");
-
             if(control_pressed) {
                 digitalWrite(led->pin, HIGH);
                 
@@ -610,7 +607,6 @@ void IO::initLED(led_config_t *led) {
 }
 
 void IO::initControlButton(button_config_t *btn) {
-    printf("initControlButton(): %d\n", btn->pin);
     gpio_pad_select_gpio(btn->pin);
     esp_err_t err = gpio_set_direction(btn->pin, GPIO_MODE_INPUT);
     if (err)
