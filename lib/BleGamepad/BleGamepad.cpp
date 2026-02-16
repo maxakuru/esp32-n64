@@ -19,12 +19,62 @@
 static const char *LOG_TAG = "BLEGamepad";
 #endif
 
-uint8_t tempHidReportDescriptor[150];
-int hidReportDescriptorSize = 0;
-uint8_t reportSize = 0;
-uint8_t numOfButtonBytes = 0;
 uint16_t vid;
-uint16_t pid; 
+uint16_t pid;
+
+// Static HID Report Descriptor: 14 buttons, 1 hat switch, 2 axes (X, Y)
+// D-pad is exposed as BOTH buttons 11-14 AND a hat switch for max compatibility.
+// Report format (7 bytes after report ID):
+//   [0]    buttons 1-8  (A,B,Z,L,R,Start,CUp,CDown)
+//   [1]    buttons 9-14 (CLeft,CRight,DUp,DDown,DLeft,DRight) + 2 padding bits
+//   [2]    hat switch   (0=centered, 1=N, 2=NE, 3=E, 4=SE, 5=S, 6=SW, 7=W, 8=NW)
+//   [3-4]  X axis       (int16_t LE)
+//   [5-6]  Y axis       (int16_t LE)
+static const uint8_t hidReportDescriptorStatic[] = {
+    0x05, 0x01,        // USAGE_PAGE (Generic Desktop)
+    0x09, 0x05,        // USAGE (Gamepad)
+    0xA1, 0x01,        // COLLECTION (Application)
+    0x85, 0x01,        //   REPORT_ID (1)
+
+    // --- 14 Buttons ---
+    0x05, 0x09,        //   USAGE_PAGE (Button)
+    0x19, 0x01,        //   USAGE_MINIMUM (Button 1)
+    0x29, 0x0E,        //   USAGE_MAXIMUM (Button 14)
+    0x15, 0x00,        //   LOGICAL_MINIMUM (0)
+    0x25, 0x01,        //   LOGICAL_MAXIMUM (1)
+    0x75, 0x01,        //   REPORT_SIZE (1)
+    0x95, 0x0E,        //   REPORT_COUNT (14)
+    0x81, 0x02,        //   INPUT (Data,Var,Abs)
+    0x75, 0x01,        //   REPORT_SIZE (1)
+    0x95, 0x02,        //   REPORT_COUNT (2) - padding
+    0x81, 0x03,        //   INPUT (Const,Var,Abs)
+
+    // --- Hat Switch (D-pad, mirrors buttons 11-14) ---
+    0x05, 0x01,        //   USAGE_PAGE (Generic Desktop)
+    0x09, 0x39,        //   USAGE (Hat Switch)
+    0x15, 0x01,        //   LOGICAL_MINIMUM (1)
+    0x25, 0x08,        //   LOGICAL_MAXIMUM (8)
+    0x35, 0x00,        //   PHYSICAL_MINIMUM (0)
+    0x46, 0x3B, 0x01,  //   PHYSICAL_MAXIMUM (315)
+    0x65, 0x14,        //   UNIT (Eng Rot: Degree)
+    0x75, 0x08,        //   REPORT_SIZE (8)
+    0x95, 0x01,        //   REPORT_COUNT (1)
+    0x81, 0x42,        //   INPUT (Data,Var,Abs,Null)
+
+    // --- Joystick Axes (X, Y) ---
+    0x05, 0x01,        //   USAGE_PAGE (Generic Desktop)
+    0xA1, 0x00,        //   COLLECTION (Physical)
+    0x09, 0x30,        //     USAGE (X)
+    0x09, 0x31,        //     USAGE (Y)
+    0x16, 0x01, 0x80,  //     LOGICAL_MINIMUM (-32767)
+    0x26, 0xFF, 0x7F,  //     LOGICAL_MAXIMUM (32767)
+    0x75, 0x10,        //     REPORT_SIZE (16)
+    0x95, 0x02,        //     REPORT_COUNT (2)
+    0x81, 0x02,        //     INPUT (Data,Var,Abs)
+    0xC0,              //   END_COLLECTION (Physical)
+
+    0xC0               // END_COLLECTION (Application)
+};
 
 // ondisconnect_cb_t BleGamepad::disconnect = NULL;
 
@@ -64,467 +114,18 @@ void BleGamepad::resetButtons()
 
 void BleGamepad::begin(BleGamepadConfiguration *config)
 {
-    configuration = *config; // we make a copy, so the user can't change actual values midway through operation, without calling the begin function again
-	
-	vid = configuration.getVid();
-	pid = configuration.getPid();
-	
-	uint8_t high = highByte(vid);
-	uint8_t low = lowByte(vid);
-	
-	vid = low << 8 | high;
-	
-	high = highByte(pid);
-	low = lowByte(pid);
-	
-	pid = low << 8 | high;
+    configuration = *config;
 
-    uint8_t buttonPaddingBits = 8 - (configuration.getButtonCount() % 8);
-    if (buttonPaddingBits == 8)
-    {
-        buttonPaddingBits = 0;
-    }
-    uint8_t specialButtonPaddingBits = 8 - (configuration.getTotalSpecialButtonCount() % 8);
-    if (specialButtonPaddingBits == 8)
-    {
-        specialButtonPaddingBits = 0;
-    }
-    uint8_t numOfAxisBytes = configuration.getAxisCount() * 2;
-    uint8_t numOfSimulationBytes = configuration.getSimulationCount() * 2;
+    vid = configuration.getVid();
+    pid = configuration.getPid();
 
-    numOfButtonBytes = configuration.getButtonCount() / 8;
-    if (buttonPaddingBits > 0)
-    {
-        numOfButtonBytes++;
-    }
+    uint8_t high = highByte(vid);
+    uint8_t low = lowByte(vid);
+    vid = low << 8 | high;
 
-    uint8_t numOfSpecialButtonBytes = configuration.getTotalSpecialButtonCount() / 8;
-    if (specialButtonPaddingBits > 0)
-    {
-        numOfSpecialButtonBytes++;
-    }
-
-    reportSize = numOfButtonBytes + numOfSpecialButtonBytes + numOfAxisBytes + numOfSimulationBytes + configuration.getHatSwitchCount();
-
-    // USAGE_PAGE (Generic Desktop)
-    tempHidReportDescriptor[hidReportDescriptorSize++] = 0x05;
-    tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-    // USAGE (Joystick - 0x04; Gamepad - 0x05; Multi-axis Controller - 0x08)
-    tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-    tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getControllerType();
-
-    // COLLECTION (Application)
-    tempHidReportDescriptor[hidReportDescriptorSize++] = 0xa1;
-    tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-    // REPORT_ID (Default: 3)
-    tempHidReportDescriptor[hidReportDescriptorSize++] = 0x85;
-    tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getHidReportId();
-
-    if (configuration.getButtonCount() > 0)
-    {
-
-        // USAGE_PAGE (Button)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x05;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-
-        // LOGICAL_MINIMUM (0)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x15;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x00;
-
-        // LOGICAL_MAXIMUM (1)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x25;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // REPORT_SIZE (1)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x75;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // USAGE_MINIMUM (Button 1)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x19;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // USAGE_MAXIMUM (Up to 128 buttons possible)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x29;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getButtonCount();
-
-        // REPORT_COUNT (# of buttons)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x95;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getButtonCount();
-
-        // INPUT (Data,Var,Abs)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x81;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x02;
-
-        if (buttonPaddingBits > 0)
-        {
-
-            // REPORT_SIZE (1)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x75;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-            // REPORT_COUNT (# of padding bits)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x95;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = buttonPaddingBits;
-
-            // INPUT (Const,Var,Abs)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x81;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x03;
-
-        } // Padding Bits Needed
-
-    } // Buttons
-
-    if (configuration.getTotalSpecialButtonCount() > 0)
-    {
-        // LOGICAL_MINIMUM (0)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x15;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x00;
-
-        // LOGICAL_MAXIMUM (1)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x25;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // REPORT_SIZE (1)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x75;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        if (configuration.getDesktopSpecialButtonCount() > 0)
-        {
-
-            // USAGE_PAGE (Generic Desktop)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x05;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-            // REPORT_COUNT
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x95;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getDesktopSpecialButtonCount();
-            if (configuration.getIncludeStart())
-            {
-                // USAGE (Start)
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x3D;
-            }
-
-            if (configuration.getIncludeSelect())
-            {
-                // USAGE (Select)
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x3E;
-            }
-
-            if (configuration.getIncludeMenu())
-            {
-                // USAGE (App Menu)
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x86;
-            }
-
-            // INPUT (Data,Var,Abs)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x81;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x02;
-        }
-
-        if (configuration.getConsumerSpecialButtonCount() > 0)
-        {
-
-            // USAGE_PAGE (Consumer Page)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x05;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x0C;
-
-            // REPORT_COUNT
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x95;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getConsumerSpecialButtonCount();
-
-            if (configuration.getIncludeHome())
-            {
-                // USAGE (Home)
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x0A;
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x23;
-		        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x02;
-            }
-
-            if (configuration.getIncludeBack())
-            {
-                // USAGE (Back)
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x0A;
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x24;
-	        	tempHidReportDescriptor[hidReportDescriptorSize++] = 0x02;
-            }
-
-            if (configuration.getIncludeVolumeInc())
-            {
-                // USAGE (Volume Increment)
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0xE9;
-            }
-
-            if (configuration.getIncludeVolumeDec())
-            {
-                // USAGE (Volume Decrement)
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0xEA;
-            }
-
-            if (configuration.getIncludeVolumeMute())
-            {
-                // USAGE (Mute)
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-                tempHidReportDescriptor[hidReportDescriptorSize++] = 0xE2;
-            }
-
-            // INPUT (Data,Var,Abs)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x81;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x02;
-        }
-
-        if (specialButtonPaddingBits > 0)
-        {
-
-            // REPORT_SIZE (1)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x75;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-            // REPORT_COUNT (# of padding bits)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x95;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = specialButtonPaddingBits;
-
-            // INPUT (Const,Var,Abs)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x81;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x03;
-
-        } // Padding Bits Needed
-
-    } // Special Buttons
-
-    if (configuration.getAxisCount() > 0)
-    {
-        // USAGE_PAGE (Generic Desktop)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x05;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // USAGE (Pointer)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // LOGICAL_MINIMUM (-32767)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x16;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x80;
-
-        // LOGICAL_MAXIMUM (+32767)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x26;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0xFF;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x7F;
-
-        // REPORT_SIZE (16)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x75;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x10;
-
-        // REPORT_COUNT (configuration.getAxisCount())
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x95;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getAxisCount();
-
-        // COLLECTION (Physical)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0xA1;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x00;
-
-        if (configuration.getIncludeXAxis())
-        {
-            // USAGE (X)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x30;
-        }
-
-        if (configuration.getIncludeYAxis())
-        {
-            // USAGE (Y)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x31;
-        }
-
-        if (configuration.getIncludeZAxis())
-        {
-            // USAGE (Z)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x32;
-        }
-
-        if (configuration.getIncludeRzAxis())
-        {
-            // USAGE (Rz)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x35;
-        }
-
-        if (configuration.getIncludeRxAxis())
-        {
-            // USAGE (Rx)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x33;
-        }
-
-        if (configuration.getIncludeRyAxis())
-        {
-            // USAGE (Ry)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x34;
-        }
-
-        if (configuration.getIncludeSlider1())
-        {
-            // USAGE (Slider)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x36;
-        }
-
-        if (configuration.getIncludeSlider2())
-        {
-            // USAGE (Slider)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x36;
-        }
-
-        // INPUT (Data,Var,Abs)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x81;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x02;
-
-        // END_COLLECTION (Physical)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0xc0;
-
-    } // X, Y, Z, Rx, Ry, and Rz Axis
-
-    if (configuration.getSimulationCount() > 0)
-    {
-
-        // USAGE_PAGE (Simulation Controls)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x05;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x02;
-
-        // LOGICAL_MINIMUM (-32767)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x16;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x80;
-
-        // LOGICAL_MAXIMUM (+32767)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x26;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0xFF;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x7F;
-
-        // REPORT_SIZE (16)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x75;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x10;
-
-        // REPORT_COUNT (configuration.getSimulationCount())
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x95;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getSimulationCount();
-
-        // COLLECTION (Physical)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0xA1;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x00;
-
-        if (configuration.getIncludeRudder())
-        {
-            // USAGE (Rudder)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0xBA;
-        }
-
-        if (configuration.getIncludeThrottle())
-        {
-            // USAGE (Throttle)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0xBB;
-        }
-
-        if (configuration.getIncludeAccelerator())
-        {
-            // USAGE (Accelerator)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0xC4;
-        }
-
-        if (configuration.getIncludeBrake())
-        {
-            // USAGE (Brake)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0xC5;
-        }
-
-        if (configuration.getIncludeSteering())
-        {
-            // USAGE (Steering)
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x09;
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0xC8;
-        }
-
-        // INPUT (Data,Var,Abs)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x81;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x02;
-
-        // END_COLLECTION (Physical)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0xc0;
-
-    } // Simulation Controls
-
-    if (configuration.getHatSwitchCount() > 0)
-    {
-
-        // COLLECTION (Physical)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0xA1;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x00;
-
-        // USAGE_PAGE (Generic Desktop)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = USAGE_PAGE(1);
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // USAGE (Hat Switch)
-        for (int currentHatIndex = 0; currentHatIndex < configuration.getHatSwitchCount(); currentHatIndex++)
-        {
-            tempHidReportDescriptor[hidReportDescriptorSize++] = USAGE(1);
-            tempHidReportDescriptor[hidReportDescriptorSize++] = 0x39;
-        }
-
-        // Logical Min (1)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x15;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // Logical Max (8)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x25;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x08;
-
-        // Physical Min (0)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x35;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x00;
-
-        // Physical Max (315)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x46;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x3B;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x01;
-
-        // Unit (SI Rot : Ang Pos)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x65;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x12;
-
-        // Report Size (8)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x75;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x08;
-
-        // Report Count (4)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x95;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = configuration.getHatSwitchCount();
-
-        // Input (Data, Variable, Absolute)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x81;
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0x42;
-
-        // END_COLLECTION (Physical)
-        tempHidReportDescriptor[hidReportDescriptorSize++] = 0xc0;
-    }
-
-    // END_COLLECTION (Application)
-    tempHidReportDescriptor[hidReportDescriptorSize++] = 0xc0;
+    high = highByte(pid);
+    low = lowByte(pid);
+    pid = low << 8 | high;
 
     xTaskCreate(this->taskServer, "server", 20000, (void *)this, 5, NULL);
 }
@@ -655,102 +256,23 @@ void BleGamepad::sendReport(void)
 {
     if (this->isConnected())
     {
-        uint8_t currentReportIndex = 0;
+        uint8_t m[7];
+        memset(m, 0, sizeof(m));
 
-        uint8_t m[reportSize];
+        // Buttons (bytes 0-1): 14 buttons packed as bits
+        m[0] = _buttons[0];          // buttons 1-8
+        m[1] = _buttons[1] & 0x3F;   // buttons 9-14, upper 2 bits padding
 
-        memset(&m, 0, sizeof(m));
-        memcpy(&m, &_buttons, sizeof(_buttons));
+        // Hat switch (byte 2): 0 = centered (null), 1-8 = directions
+        m[2] = (uint8_t)_hat1;
 
-        currentReportIndex += numOfButtonBytes;
+        // X axis (bytes 3-4): int16_t little-endian
+        m[3] = (uint8_t)(_x & 0xFF);
+        m[4] = (uint8_t)((_x >> 8) & 0xFF);
 
-        if (configuration.getTotalSpecialButtonCount() > 0)
-        {
-            m[currentReportIndex++] = _specialButtons;
-        }
-
-        if (configuration.getIncludeXAxis())
-        {
-            m[currentReportIndex++] = _x;
-            m[currentReportIndex++] = (_x >> 8);
-        }
-        if (configuration.getIncludeYAxis())
-        {
-            m[currentReportIndex++] = _y;
-            m[currentReportIndex++] = (_y >> 8);
-        }
-        if (configuration.getIncludeZAxis())
-        {
-            m[currentReportIndex++] = _z;
-            m[currentReportIndex++] = (_z >> 8);
-        }
-        if (configuration.getIncludeRzAxis())
-        {
-            m[currentReportIndex++] = _rZ;
-            m[currentReportIndex++] = (_rZ >> 8);
-        }
-        if (configuration.getIncludeRxAxis())
-        {
-            m[currentReportIndex++] = _rX;
-            m[currentReportIndex++] = (_rX >> 8);
-        }
-        if (configuration.getIncludeRyAxis())
-        {
-            m[currentReportIndex++] = _rY;
-            m[currentReportIndex++] = (_rY >> 8);
-        }
-
-        if (configuration.getIncludeSlider1())
-        {
-            m[currentReportIndex++] = _slider1;
-            m[currentReportIndex++] = (_slider1 >> 8);
-        }
-        if (configuration.getIncludeSlider2())
-        {
-            m[currentReportIndex++] = _slider2;
-            m[currentReportIndex++] = (_slider2 >> 8);
-        }
-
-        if (configuration.getIncludeRudder())
-        {
-            m[currentReportIndex++] = _rudder;
-            m[currentReportIndex++] = (_rudder >> 8);
-        }
-        if (configuration.getIncludeThrottle())
-        {
-            m[currentReportIndex++] = _throttle;
-            m[currentReportIndex++] = (_throttle >> 8);
-        }
-        if (configuration.getIncludeAccelerator())
-        {
-            m[currentReportIndex++] = _accelerator;
-            m[currentReportIndex++] = (_accelerator >> 8);
-        }
-        if (configuration.getIncludeBrake())
-        {
-            m[currentReportIndex++] = _brake;
-            m[currentReportIndex++] = (_brake >> 8);
-        }
-        if (configuration.getIncludeSteering())
-        {
-            m[currentReportIndex++] = _steering;
-            m[currentReportIndex++] = (_steering >> 8);
-        }
-
-        if (configuration.getHatSwitchCount() > 0)
-        {
-            signed char hats[4];
-
-            hats[0] = _hat1;
-            hats[1] = _hat2;
-            hats[2] = _hat3;
-            hats[3] = _hat4;
-
-            for (int currentHatIndex = configuration.getHatSwitchCount() - 1; currentHatIndex >= 0; currentHatIndex--)
-            {
-                m[currentReportIndex++] = hats[currentHatIndex];
-            }
-        }
+        // Y axis (bytes 5-6): int16_t little-endian
+        m[5] = (uint8_t)(_y & 0xFF);
+        m[6] = (uint8_t)((_y >> 8) & 0xFF);
 
         this->inputGamepad->setValue(m, sizeof(m));
         this->inputGamepad->notify();
@@ -1306,7 +828,7 @@ void BleGamepad::taskServer(void *pvParameter)
     pServer->setCallbacks(BleGamepadInstance->connectionStatus);
 
     BleGamepadInstance->hid = new NimBLEHIDDevice(pServer);
-    BleGamepadInstance->inputGamepad = BleGamepadInstance->hid->inputReport(BleGamepadInstance->configuration.getHidReportId()); // <-- input REPORTID from report map
+    BleGamepadInstance->inputGamepad = BleGamepadInstance->hid->inputReport(1); // report ID 1 matching static descriptor
     BleGamepadInstance->connectionStatus->inputGamepad = BleGamepadInstance->inputGamepad;
 
     BleGamepadInstance->hid->manufacturer()->setValue(BleGamepadInstance->deviceManufacturer);
@@ -1318,13 +840,12 @@ void BleGamepad::taskServer(void *pvParameter)
 
     pSecurity->setAuthenticationMode(ESP_LE_AUTH_BOND);
 
-    uint8_t *customHidReportDescriptor = new uint8_t[hidReportDescriptorSize];
-    memcpy(customHidReportDescriptor, tempHidReportDescriptor, hidReportDescriptorSize);
+    Serial.printf("[HID] descriptor (%d bytes): ", sizeof(hidReportDescriptorStatic));
+    for (size_t i = 0; i < sizeof(hidReportDescriptorStatic); i++)
+        Serial.printf("%02x", hidReportDescriptorStatic[i]);
+    Serial.println();
 
-    for (int i = 0; i < hidReportDescriptorSize; i++)
-        Serial.printf("%02x", customHidReportDescriptor[i]);
-
-    BleGamepadInstance->hid->reportMap((uint8_t *)customHidReportDescriptor, hidReportDescriptorSize);
+    BleGamepadInstance->hid->reportMap((uint8_t *)hidReportDescriptorStatic, sizeof(hidReportDescriptorStatic));
     BleGamepadInstance->hid->startServices();
 
     if(BleGamepadInstance->onstarted_cb != NULL){

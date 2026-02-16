@@ -8,7 +8,7 @@
 #define LED_STATE_BLINK 2
 
 #define MAX_BUTTONS 20
-#define MAX_HATS 2
+#define MAX_HATS 1
 #define MAX_AXES 2
 
 
@@ -26,26 +26,23 @@ enum class Input {
   Length
 };
 
-enum class Button { 
+enum class Button {
   None = -1,
-  Start = 0, 
-  Select = 1, // unassigned
-  Menu = 2, // unassigned
-  Home = 3, // unassigned
-  Back = 4, // unassigned
-  VolumeUp = 5, // unassigned
-  VolumeDown = 6, // unassigned
-  VolumeMute = 7, // unassigned
-  A = 8,
-  B = 9,
-  Z = 10,
-  L1 = 11,
-  R1 = 12, 
-  L2 = 13, // unassigned
-  L3 = 14, // unassigned
-  R2 = 15, // unassigned
-  R3 = 16, // unassigned
-  Control,
+  A = 0,       // HID Button 1
+  B,           // HID Button 2
+  Z,           // HID Button 3
+  L,           // HID Button 4
+  R,           // HID Button 5
+  Start,       // HID Button 6
+  CUp,         // HID Button 7
+  CDown,       // HID Button 8
+  CLeft,       // HID Button 9
+  CRight,      // HID Button 10
+  DUp,         // HID Button 11
+  DDown,       // HID Button 12
+  DLeft,       // HID Button 13
+  DRight,      // HID Button 14
+  Control,     // internal only (BOOT button), not sent to HID
   Length
 };
 
@@ -66,7 +63,6 @@ enum class AxisDimension {
 enum class Hat {
   None = -1,
   DPad = 0,
-  CPad,
   Length
 };
 
