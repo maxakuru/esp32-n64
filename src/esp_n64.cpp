@@ -7,21 +7,25 @@
 #include "configurator.hpp"
 
 
-#define CHECK_BIT(var, pos) ((var) & (1 << (pos)))
-
-char bda_str[18];
-int tick = 0;
-uint8_t iniX = 0x83;
-uint8_t iniY = 0x83;
-bool initialized = false;
-bool startPressed = false;
-
+static void powerOff() {
+  log_i("[main] powering off..\n");
+  delay(100); // let serial flush
+  digitalWrite(PIN_POWER_TOGGLE, LOW);
+  // if USB-powered, the latch drop won't kill power,
+  // so fall back to deep sleep
+  esp_deep_sleep_start();
+}
 
 void setup()
 {
+  // FIRST: latch power on before anything else.
+  // The soft power switch (T6/T8) drops power as soon as the
+  // CTRL button is released unless IO32 is driven HIGH.
+  pinMode(PIN_POWER_TOGGLE, OUTPUT);
+  digitalWrite(PIN_POWER_TOGGLE, HIGH);
+
   Serial.begin(115200);
   log_i("[main] Starting up...\n");
-  delay(2500);
 
   IO::init();
   IO::setLEDState(LedState::Off);
@@ -31,6 +35,7 @@ void setup()
   });
 
   BTLE::onConnect([]() {
+      Serial.printf("[main] BLE connected!\n");
       IO::setLEDState(LedState::Off);
   });
 
@@ -60,22 +65,19 @@ void setup()
       IO::setLEDState(LedState::Blink, 400, 600);
       BTLE::toggleSync();
     } else if(duration >= 1500) {
-      log_i("[main] off..\n");
+      powerOff();
     } else {
       log_i("[main] click..\n");
     }
-    // < 1s == click == nothing (todo: power on)
-    // 1s == nothing (todo: power off)
+    // < 1s == click == nothing
+    // 1.5s => power off
     // 3s => sync mode
     // 5s => config mode
+    // 20s => full reset
   });
 }
 
 void loop()
 {
-  // IO::loop();
+  vTaskDelay(portMAX_DELAY);
 }
-
-
-
-

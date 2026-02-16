@@ -48,9 +48,10 @@
 #define TIMER_N TIMER_0
 
 #define NUM_ANALOG_SAMPLES 6     // number of analog readings to average over
+#define JOYSTICK_NOISE_THRESHOLD 4 // ignore ADC changes smaller than this
 #define TIMER_DIVIDER 2
 #define TIMER_SCALE           (TIMER_BASE_CLK / TIMER_DIVIDER)  // convert counter value to seconds
-#define TIMER_INTERVAL0_SEC   (0.001) // sample test interval for the first timer
+#define TIMER_INTERVAL0_SEC   (0.01) // joystick poll interval (10ms = 100Hz)
 
 struct input_message_t {
     gpio_num_t pin;
@@ -100,64 +101,29 @@ int last_timers[40];
 int IO::state[10][30][10];
 
 io_config_t IO::config = {
-    // buttons
+    // buttons (14 N64 buttons: face + C-pad + D-pad)
     {
-        {
-            (gpio_num_t)PIN_A, // pin
-            Button::A          // type
-        },
-        {
-            (gpio_num_t)PIN_B,
-            Button::B
-        },
-        {
-            (gpio_num_t)PIN_START,
-            Button::Start
-        },
-        {   
-            (gpio_num_t)PIN_Z,
-            Button::Z
-        },
-        {
-            (gpio_num_t)PIN_SHOULDER_LEFT,
-            Button::L1
-        },
-        {
-            (gpio_num_t)PIN_SHOULDER_RIGHT,
-            Button::R1
-        },
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1},
-        {(gpio_num_t)-1}
+        {(gpio_num_t)PIN_A, Button::A},
+        {(gpio_num_t)PIN_B, Button::B},
+        {(gpio_num_t)PIN_Z, Button::Z},
+        {(gpio_num_t)PIN_SHOULDER_LEFT, Button::L},
+        {(gpio_num_t)PIN_SHOULDER_RIGHT, Button::R},
+        {(gpio_num_t)PIN_START, Button::Start},
+        {(gpio_num_t)PIN_C_UP, Button::CUp},
+        {(gpio_num_t)PIN_C_DOWN, Button::CDown},
+        {(gpio_num_t)PIN_C_LEFT, Button::CLeft},
+        {(gpio_num_t)PIN_C_RIGHT, Button::CRight},
+        {(gpio_num_t)PIN_D_UP, Button::DUp},
+        {(gpio_num_t)PIN_D_DOWN, Button::DDown},
+        {(gpio_num_t)PIN_D_LEFT, Button::DLeft},
+        {(gpio_num_t)PIN_D_RIGHT, Button::DRight},
+        {(gpio_num_t)-1}, {(gpio_num_t)-1}, {(gpio_num_t)-1}, {(gpio_num_t)-1},
+        {(gpio_num_t)-1}, {(gpio_num_t)-1}
     },
 
-    // hats
+    // hats (none — D-pad is buttons; hat switch computed in btle.cpp)
     {
-        {
-            (gpio_num_t)PIN_D_UP,    // up pin
-            (gpio_num_t)PIN_D_RIGHT, // right pin
-            (gpio_num_t)PIN_D_DOWN,  // down pin
-            (gpio_num_t)PIN_D_LEFT,  // left pin
-            Hat::DPad                // type
-        },
-        {
-            (gpio_num_t)PIN_C_UP,
-            (gpio_num_t)PIN_C_RIGHT,
-            (gpio_num_t)PIN_C_DOWN,
-            (gpio_num_t)PIN_C_LEFT,
-            Hat::CPad
-        }
+        {(gpio_num_t)-1, (gpio_num_t)-1, (gpio_num_t)-1, (gpio_num_t)-1, Hat::None}
     },
 
     // joysticks
@@ -228,6 +194,8 @@ void IRAM_ATTR IO::inputTask(void *_)
     {
         if (xSemaphoreTake(input_sem, portMAX_DELAY) == pdTRUE)
         {
+            // Wait for contact to settle before reading pin state
+            vTaskDelay(5 / portTICK_PERIOD_MS);
             struct input_message_t args;
             while (xQueueReceive(queue, &args, 0) == pdTRUE)
             {
@@ -327,7 +295,7 @@ void IRAM_ATTR IO::joystickTask(void *args) {
                     // x
                     uint16_t val = analogReadAverage(axis.x_pin, NUM_ANALOG_SAMPLES, MIN_JOYSTICK_HOME_X, MAX_JOYSTICK_HOME_X, AVG_JOYSTICK_HOME_X);
                     uint16_t prev = IO::state[(int)Input::Axis][(int)axis.type][(int)AxisDimension::X];
-                    if(prev != val) {
+                    if(abs((int)val - (int)prev) > JOYSTICK_NOISE_THRESHOLD) {
                         needsUpdate = true;
                         IO::state[(int)Input::Axis][(int)axis.type][(int)AxisDimension::X] = val;
                     }
@@ -336,7 +304,7 @@ void IRAM_ATTR IO::joystickTask(void *args) {
                     // y
                     uint16_t val = analogReadAverage(axis.y_pin, NUM_ANALOG_SAMPLES, MIN_JOYSTICK_HOME_Y, MAX_JOYSTICK_HOME_Y, AVG_JOYSTICK_HOME_Y);
                     uint16_t prev = IO::state[(int)Input::Axis][(int)axis.type][(int)AxisDimension::Y];
-                    if(prev != val) {
+                    if(abs((int)val - (int)prev) > JOYSTICK_NOISE_THRESHOLD) {
                         needsUpdate = true;
                         IO::state[(int)Input::Axis][(int)axis.type][(int)AxisDimension::Y] = val;
                     }
@@ -346,6 +314,7 @@ void IRAM_ATTR IO::joystickTask(void *args) {
                 }
             }
             timer_group_enable_alarm_in_isr(TIMER_GROUP, TIMER_N);
+            taskYIELD();
         }
     }
     vTaskDelete(NULL);
@@ -395,16 +364,18 @@ void IO::updateState(Input type, uint8_t index) {
 
 void IO::updateState(gpio_num_t pin, Input type, uint8_t index, int id) {
     if(type == Input::Button) {
-        int v = digitalRead(pin);
+        int v = !digitalRead(pin); // active LOW: pressed = LOW → v = 1
         if(IO::state[(int)type][index][id] == v) {
             return;
         }
         IO::state[(int)type][index][id] = v;
+        Serial.printf("[IO] btn pin=%d idx=%d val=%d cb=%s\n",
+            pin, index, v, buttonchange_cb ? "yes" : "no");
         if(IO::buttonchange_cb != NULL) {
             IO::buttonchange_cb((Button)index, v == HIGH);
         }
     } else if(type == Input::Hat) {
-        int v = digitalRead(pin);
+        int v = !digitalRead(pin); // active LOW: pressed = LOW → v = 1
         auto prev = IO::state[(int)type][index][id];
         IO::state[(int)type][index][id] = v;
 
@@ -556,7 +527,7 @@ bool IO::init()
         if(btn->type == Button::None || btn->pin < 0) {
             continue;
         }
-        log_d("[IO] init button (%d) on pin #%d\n", btn.type, btn.pin);
+        log_d("[IO] init button (%d) on pin #%d\n", btn->type, btn->pin);
         initButton(btn);
     }
 
@@ -579,6 +550,9 @@ bool IO::init()
     }
 
     initJoystickTimer();
+
+    Serial.printf("[IO] init complete: %d buttons, %d hats, joystick on X=%d Y=%d\n",
+        interrupt_count, MAX_HATS, PIN_JOYSTICK_X, PIN_JOYSTICK_Y);
 
     initialized = true;
     return true;
@@ -635,7 +609,7 @@ void IO::initControlButton(button_config_t *btn) {
         return;
     }
 
-    err = gpio_isr_handler_add(btn->pin, controlIntrDelegate, (void *)&btn);
+    err = gpio_isr_handler_add(btn->pin, controlIntrDelegate, (void *)btn);
 
     if (err)
     {
@@ -645,10 +619,12 @@ void IO::initControlButton(button_config_t *btn) {
 }
 
 void IO::initJoystickTimer() {
-    timer_config_t config;
+    timer_config_t config = {};
     config.divider     = TIMER_DIVIDER;
+    config.counter_dir = TIMER_COUNT_UP;
     config.counter_en  = TIMER_PAUSE;
     config.alarm_en    = TIMER_ALARM_EN;
+    config.intr_type   = TIMER_INTR_LEVEL;
     config.auto_reload = (timer_autoreload_t) 1;
 
     timer_init(TIMER_GROUP, TIMER_N, &config);
@@ -677,7 +653,7 @@ void IO::initButton(button_config_t *btn)
 
 void IO::initAxis(axis_config_t *axis, uint8_t index)
 {
-    log_d("[IO] initAxis() type=%d, x=%d, y=%d\n", axis.type, axis.x_pin, axis.y_pin);
+    log_d("[IO] initAxis() type=%d, x=%d, y=%d\n", axis->type, axis->x_pin, axis->y_pin);
     // #ifdef USE_ATTENUATION
     // adc_attenuation_t att = (adc_attenuation_t)12;
     // #else
@@ -712,7 +688,7 @@ void IO::initInputPin(gpio_num_t pin, Input type, uint8_t index, int id)
         return;
     }
 
-    err = gpio_set_pull_mode(pin, GPIO_PULLDOWN_ONLY);
+    err = gpio_set_pull_mode(pin, GPIO_PULLUP_ONLY);
     if (err)
     {
         log_e("[IO] initInputPin(%d) >> error setting pull direction: %i\n", pin, (int)err);

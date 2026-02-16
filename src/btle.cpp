@@ -15,46 +15,52 @@ NimBLEServer* BTLE::bleServer = nullptr;
 
 BleGamepad BTLE::gamepad = BleGamepad(getGamepadId(), "Acme Co.", 100);
 
+static uint8_t computeHatFromDpad() {
+    bool u = BTLE::gamepad.isPressed((uint8_t)Button::DUp + 1);
+    bool d = BTLE::gamepad.isPressed((uint8_t)Button::DDown + 1);
+    bool l = BTLE::gamepad.isPressed((uint8_t)Button::DLeft + 1);
+    bool r = BTLE::gamepad.isPressed((uint8_t)Button::DRight + 1);
+
+    if(u && !d) {
+        if(r) return 2;      // NE
+        if(l) return 8;      // NW
+        return 1;             // N
+    }
+    if(d && !u) {
+        if(r) return 4;      // SE
+        if(l) return 6;      // SW
+        return 5;             // S
+    }
+    if(r && !l) return 3;    // E
+    if(l && !r) return 7;    // W
+    return 0;                 // centered
+}
+
 void addCallbacks() {
-  IO::onHatChange([](Hat hat, uint8_t data){
-      // log_d("[BTLE] onHatChange(): hat=%d data=%d\n", hat, data);
-      if(hat == Hat::DPad) {
-          BTLE::gamepad.setHat1(data);
-      } else if(hat == Hat::CPad) {
-          BTLE::gamepad.setHat2(data);
-      }
-  });
+  Serial.printf("[BTLE] addCallbacks: wiring IO -> BLE HID\n");
 
   IO::onAxisChange([](Axis axis, int16_t data[]){
-      // log_d("[BTLE] onAxisChange(): axis=%d data=%d ndims=%d\n", axis, data, nDims);
-      if(axis == Axis::Left) {
-          BTLE::gamepad.setLeftThumb(data[0], data[1]);
-      } else if(axis == Axis::Right) {
-          BTLE::gamepad.setRightThumb(data[0], data[1]);
-      }
+      BTLE::gamepad.setX(data[0]);
+      BTLE::gamepad.setY(data[1]);
+      BTLE::gamepad.sendReport();
   });
 
   IO::onButtonChange([](Button btn, bool pressed){
-      // log_d("[BTLE] onButtonChange(): btn=%d pressed=%d\n", btn, pressed);
-      if(btn >= Button::Control || btn == Button::None) return;
-      if(btn < Button::VolumeMute) {
-          if(pressed) BTLE::gamepad.pressSpecialButton((uint8_t)btn);
-          else BTLE::gamepad.releaseSpecialButton((uint8_t)btn);
-          return;
+      if(btn == Button::None || btn >= Button::Control) return;
+      uint8_t n = (uint8_t)btn + 1; // HID buttons are 1-based
+      if(pressed) BTLE::gamepad.press(n);
+      else BTLE::gamepad.release(n);
+
+      // Mirror D-pad buttons to hat switch for Steam/GCController compatibility
+      if(btn >= Button::DUp && btn <= Button::DRight) {
+          BTLE::gamepad.setHat1(computeHatFromDpad());
       }
 
-      // otherwise button #X
-      uint8_t n = (uint8_t)btn - (uint8_t) Button::VolumeMute;
-      if (pressed) {
-          BTLE::gamepad.press(n);  
-      } else {
-          BTLE::gamepad.release(n);  
-      }
+      BTLE::gamepad.sendReport();
   });
 }
 
 void rmCallbacks() {
-  IO::onHatChange(NULL);
   IO::onAxisChange(NULL);
   IO::onButtonChange(NULL);
 }
@@ -67,14 +73,7 @@ bool BTLE::init(){
     log_d("[BTLE] init()\n");
 
     BleGamepadConfiguration conf;
-    conf.setAutoReport(true);
-    conf.setControllerType(CONTROLLER_TYPE_GAMEPAD); // CONTROLLER_TYPE_JOYSTICK, CONTROLLER_TYPE_GAMEPAD (DEFAULT), CONTROLLER_TYPE_MULTI_AXIS
-    conf.setButtonCount(NUM_BUTTONS); // A, B, Z, R, L
-    conf.setHatSwitchCount(NUM_HAT_SWITCHES); // d-pad, c-pad
-    conf.setIncludeStart(true);
-    conf.setIncludeXAxis(true);
-    conf.setIncludeYAxis(true);
-
+    conf.setAutoReport(false); // we call sendReport() manually for atomic updates
     conf.setVid(0xe502);
     conf.setPid(0xbbaa);
 
